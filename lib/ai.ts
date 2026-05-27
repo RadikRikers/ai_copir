@@ -11,7 +11,8 @@ import type {
   StyleProfile,
 } from "./types";
 
-let openaiClient: OpenAI | null = null;
+let aiClient: OpenAI | null = null;
+let aiClientCacheKey = "";
 
 const MAX_TEXT_CHARS = 18000;
 const MAX_EXAMPLE_CHARS = 6000;
@@ -24,23 +25,133 @@ const MAX_GENERATION_EXAMPLES = 6;
 const MAX_LESSONS_IN_PROMPT = 8;
 const MAX_LEARNED_CORRECTIONS = 14;
 
-function model() {
-  return process.env.OPENAI_MODEL || process.env.LLM_MODEL || "gpt-4o-mini";
+type AiProvider = "openrouter" | "gemini" | "openai" | "custom";
+
+type AiRuntimeConfig = {
+  provider: AiProvider;
+  model: string;
+  apiKey: string;
+  baseURL?: string;
+  configured: boolean;
+  missingEnv?: string;
+  defaultHeaders?: Record<string, string>;
+};
+
+function cleanEnv(value: string | undefined) {
+  const text = value?.trim() || "";
+  if (!text || text.includes("твой_") || text.includes("строка_подключения")) return "";
+  return text;
+}
+
+function publicAppUrl() {
+  const value = cleanEnv(process.env.APP_URL) || cleanEnv(process.env.VERCEL_PROJECT_PRODUCTION_URL);
+  if (!value) return "https://vercel.app";
+  return value.startsWith("http://") || value.startsWith("https://") ? value : `https://${value}`;
+}
+
+function resolveProvider(): AiProvider {
+  const explicit = cleanEnv(process.env.AI_PROVIDER || process.env.LLM_PROVIDER).toLowerCase();
+  if (["openrouter", "gemini", "openai", "custom"].includes(explicit)) return explicit as AiProvider;
+  if (cleanEnv(process.env.OPENROUTER_API_KEY)) return "openrouter";
+  if (cleanEnv(process.env.GEMINI_API_KEY)) return "gemini";
+  if (cleanEnv(process.env.OPENAI_API_KEY)) return "openai";
+  return "openrouter";
+}
+
+export function aiRuntimeConfig(): AiRuntimeConfig {
+  const provider = resolveProvider();
+
+  if (provider === "openrouter") {
+    const apiKey = cleanEnv(process.env.OPENROUTER_API_KEY);
+    return {
+      provider,
+      apiKey,
+      model: cleanEnv(process.env.OPENROUTER_MODEL) || cleanEnv(process.env.LLM_MODEL) || "openrouter/free",
+      baseURL: cleanEnv(process.env.OPENROUTER_BASE_URL) || "https://openrouter.ai/api/v1",
+      configured: Boolean(apiKey),
+      missingEnv: apiKey ? undefined : "OPENROUTER_API_KEY",
+      defaultHeaders: {
+        "HTTP-Referer": publicAppUrl(),
+        "X-Title": "AI Copywriter Agent",
+      },
+    };
+  }
+
+  if (provider === "gemini") {
+    const apiKey = cleanEnv(process.env.GEMINI_API_KEY);
+    return {
+      provider,
+      apiKey,
+      model: cleanEnv(process.env.GEMINI_MODEL) || cleanEnv(process.env.LLM_MODEL) || "gemini-2.5-flash",
+      baseURL: cleanEnv(process.env.GEMINI_BASE_URL) || "https://generativelanguage.googleapis.com/v1beta/openai/",
+      configured: Boolean(apiKey),
+      missingEnv: apiKey ? undefined : "GEMINI_API_KEY",
+    };
+  }
+
+  if (provider === "custom") {
+    const apiKey = cleanEnv(process.env.LLM_API_KEY) || cleanEnv(process.env.OPENAI_API_KEY) || "local-llm";
+    const baseURL = cleanEnv(process.env.LLM_BASE_URL) || cleanEnv(process.env.OPENAI_BASE_URL);
+    return {
+      provider,
+      apiKey,
+      model: cleanEnv(process.env.LLM_MODEL) || cleanEnv(process.env.OPENAI_MODEL) || "local-model",
+      baseURL,
+      configured: Boolean(baseURL),
+      missingEnv: baseURL ? undefined : "LLM_BASE_URL",
+    };
+  }
+
+  const apiKey = cleanEnv(process.env.OPENAI_API_KEY);
+  const baseURL = cleanEnv(process.env.OPENAI_BASE_URL) || cleanEnv(process.env.LLM_BASE_URL);
+  return {
+    provider: "openai",
+    apiKey,
+    model: cleanEnv(process.env.OPENAI_MODEL) || cleanEnv(process.env.LLM_MODEL) || "gpt-4o-mini",
+    baseURL: baseURL || undefined,
+    configured: Boolean(apiKey || baseURL),
+    missingEnv: apiKey || baseURL ? undefined : "OPENAI_API_KEY",
+  };
 }
 
 function getOpenAI() {
-  const apiKey = process.env.OPENAI_API_KEY;
-  const baseURL = process.env.OPENAI_BASE_URL || process.env.LLM_BASE_URL;
-  if (!apiKey && !baseURL) {
-    throw new AppError("OPENAI_API_KEY is not set. Add it in Vercel Environment Variables.", 500);
+  const config = aiRuntimeConfig();
+  if (!config.configured) {
+    throw new AppError(`Не настроена нейронка. Добавьте ${config.missingEnv} в переменные Vercel.`, 500);
   }
-  if (!openaiClient) {
-    openaiClient = new OpenAI({
-      apiKey: apiKey || "local-llm",
-      baseURL: baseURL || undefined,
+
+  const cacheKey = `${config.provider}:${config.baseURL || "default"}:${config.apiKey.slice(0, 10)}`;
+  if (!aiClient || aiClientCacheKey !== cacheKey) {
+    aiClient = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: config.baseURL,
+      defaultHeaders: config.defaultHeaders,
     });
+    aiClientCacheKey = cacheKey;
   }
-  return openaiClient;
+  return { client: aiClient, config };
+}
+
+function toAiError(error: unknown, config: AiRuntimeConfig) {
+  const details = error as { status?: number; code?: string; message?: string; error?: { message?: string } };
+  const status = details?.status;
+  const message = details?.error?.message || details?.message || "";
+
+  if (status === 429 || details?.code === "rate_limit_exceeded" || message.includes("429")) {
+    if (config.provider === "openrouter") {
+      return new AppError("Бесплатный лимит OpenRouter временно исчерпан. Подождите немного и повторите запрос.", 429);
+    }
+    if (config.provider === "gemini") {
+      return new AppError("Бесплатный лимит Gemini временно исчерпан. Подождите немного и повторите запрос.", 429);
+    }
+    return new AppError("У OpenAI закончилась квота. Переключите сайт на OpenRouter Free или Gemini в переменных Vercel.", 429);
+  }
+
+  if (status === 401 || status === 403) {
+    return new AppError(`Ключ для провайдера ${config.provider} не принят. Проверьте переменные окружения.`, status);
+  }
+
+  return error;
 }
 
 function parseJsonObject(raw: string) {
@@ -65,9 +176,9 @@ async function callJson({
   temperature: number;
   maxTokens: number;
 }) {
-  const client = getOpenAI();
+  const { client, config } = getOpenAI();
   const request = {
-    model: model(),
+    model: config.model,
     messages: messages as never,
     temperature,
     max_tokens: maxTokens,
@@ -82,10 +193,14 @@ async function callJson({
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (!message.toLowerCase().includes("response_format") && !message.toLowerCase().includes("json")) {
-      throw error;
+      throw toAiError(error, config);
     }
-    const response = await client.chat.completions.create(request);
-    return parseJsonObject(response.choices[0]?.message?.content || "");
+    try {
+      const response = await client.chat.completions.create(request);
+      return parseJsonObject(response.choices[0]?.message?.content || "");
+    } catch (fallbackError) {
+      throw toAiError(fallbackError, config);
+    }
   }
 }
 

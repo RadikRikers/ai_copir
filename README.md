@@ -33,7 +33,7 @@
 - Next.js App Router;
 - Vercel;
 - Neon Postgres через `DATABASE_URL`;
-- OpenAI SDK или совместимый LLM endpoint;
+- OpenRouter Free Router, Gemini или OpenAI-compatible LLM endpoint;
 - Server-Sent Events для синхронизации открытых вкладок.
 
 ## Локальный запуск
@@ -48,17 +48,41 @@ npm run dev
 
 ```env
 DATABASE_URL=postgresql://...
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4o-mini
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=openrouter/free
 ```
 
 Откройте `http://localhost:3000`.
+
+## Нейронка
+
+Бесплатный вариант по умолчанию:
+
+```env
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=openrouter/free
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+```
+
+`openrouter/free` сам выбирает доступную бесплатную модель и фильтрует её под возможности запроса: текст, изображения, JSON-ответы. У бесплатного режима есть дневные лимиты, поэтому для отдела это хороший старт и тестовый режим, но при активной работе может понадобиться платный лимит или отдельный корпоративный ключ.
+
+Альтернатива через Gemini:
+
+```env
+AI_PROVIDER=gemini
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+Если `AI_PROVIDER` не задан, приложение само выберет провайдера по найденному ключу в таком порядке: OpenRouter, Gemini, OpenAI.
 
 ## Деплой на Vercel
 
 1. Создайте проект на Vercel из папки `ai-copywriter-agent`.
 2. Подключите Neon Postgres и добавьте `DATABASE_URL`.
-3. Добавьте `OPENAI_API_KEY` и `OPENAI_MODEL`.
+3. Добавьте переменные для бесплатной нейронки: `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free`.
 4. Запустите деплой.
 
 Таблицы создаются автоматически при первом обращении к API.
