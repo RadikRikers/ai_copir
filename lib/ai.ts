@@ -72,7 +72,7 @@ export function aiRuntimeConfig(): AiRuntimeConfig {
       missingEnv: apiKey ? undefined : "OPENROUTER_API_KEY",
       defaultHeaders: {
         "HTTP-Referer": publicAppUrl(),
-        "X-Title": "AI Copywriter Agent",
+        "X-OpenRouter-Title": "AI Copywriter Agent",
       },
     };
   }
