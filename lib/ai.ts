@@ -17,6 +17,8 @@ let aiClientCacheKey = "";
 const MAX_TEXT_CHARS = 18000;
 const MAX_EXAMPLE_CHARS = 6000;
 const MAX_IMAGE_COUNT = 10;
+const MAX_LESSON_TEXT_CHARS = 7000;
+const MAX_LESSON_RECOMMENDATION_CHARS = 1200;
 const MIN_READY_EXAMPLES = 6;
 const MIN_READY_TEXT_CHARS = 2500;
 const RECOMMENDED_SHORT_POSTS = 10;
@@ -36,6 +38,10 @@ type AiRuntimeConfig = {
   missingEnv?: string;
   defaultHeaders?: Record<string, string>;
 };
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function cleanEnv(value: string | undefined) {
   const text = value?.trim() || "";
@@ -58,8 +64,8 @@ function resolveProvider(): AiProvider {
   return "openrouter";
 }
 
-export function aiRuntimeConfig(): AiRuntimeConfig {
-  const provider = resolveProvider();
+export function aiRuntimeConfig(providerOverride?: AiProvider): AiRuntimeConfig {
+  const provider = providerOverride || resolveProvider();
 
   if (provider === "openrouter") {
     const apiKey = cleanEnv(process.env.OPENROUTER_API_KEY);
@@ -114,8 +120,7 @@ export function aiRuntimeConfig(): AiRuntimeConfig {
   };
 }
 
-function getOpenAI() {
-  const config = aiRuntimeConfig();
+function getAiClient(config: AiRuntimeConfig) {
   if (!config.configured) {
     throw new AppError(`Не настроена нейронка. Добавьте ${config.missingEnv} в переменные Vercel.`, 500);
   }
@@ -126,10 +131,34 @@ function getOpenAI() {
       apiKey: config.apiKey,
       baseURL: config.baseURL,
       defaultHeaders: config.defaultHeaders,
+      maxRetries: 1,
+      timeout: Number(cleanEnv(process.env.LLM_TIMEOUT_MS)) || 45000,
     });
     aiClientCacheKey = cacheKey;
   }
   return { client: aiClient, config };
+}
+
+function configForProvider(provider: AiProvider): AiRuntimeConfig {
+  return aiRuntimeConfig(provider);
+}
+
+function requestConfigs() {
+  const primary = aiRuntimeConfig();
+  const configs = [primary];
+  const fallbackProvider = cleanEnv(process.env.AI_FALLBACK_PROVIDER).toLowerCase();
+  const fallbackCandidates = [
+    fallbackProvider,
+    primary.provider === "openrouter" ? "gemini" : "openrouter",
+  ].filter((provider): provider is AiProvider => ["openrouter", "gemini"].includes(provider));
+
+  for (const provider of fallbackCandidates) {
+    if (configs.some((config) => config.provider === provider)) continue;
+    const fallback = configForProvider(provider);
+    if (fallback.configured) configs.push(fallback);
+  }
+
+  return configs;
 }
 
 function toAiError(error: unknown, config: AiRuntimeConfig) {
@@ -154,6 +183,54 @@ function toAiError(error: unknown, config: AiRuntimeConfig) {
   return error;
 }
 
+function errorMessage(error: unknown) {
+  const details = error as { message?: string; error?: { message?: string } };
+  return details?.error?.message || details?.message || (error instanceof Error ? error.message : "");
+}
+
+function errorStatus(error: unknown) {
+  return (error as { status?: number })?.status;
+}
+
+function isResponseFormatIssue(error: unknown) {
+  const message = errorMessage(error).toLowerCase();
+  return message.includes("response_format") || message.includes("json schema") || message.includes("json_object");
+}
+
+function isTransientAiError(error: unknown) {
+  const status = errorStatus(error);
+  const message = errorMessage(error).toLowerCase();
+  return (
+    status === 408 ||
+    status === 409 ||
+    status === 425 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("gateway") ||
+    message.includes("overloaded") ||
+    message.includes("temporarily") ||
+    message.includes("econnreset") ||
+    message.includes("socket")
+  );
+}
+
+function messagesWithJsonGuard(messages: Array<Record<string, unknown>>, attempt: number) {
+  if (attempt === 0) return messages;
+  return [
+    {
+      role: "system",
+      content:
+        "Ответ должен быть только валидным JSON-объектом без markdown, пояснений, комментариев и текста вне фигурных скобок.",
+    },
+    ...messages,
+  ];
+}
+
 function parseJsonObject(raw: string) {
   const text = raw.trim();
   if (!text) throw new AppError("Модель вернула пустой ответ.", 502);
@@ -176,32 +253,57 @@ async function callJson({
   temperature: number;
   maxTokens: number;
 }) {
-  const { client, config } = getOpenAI();
-  const request = {
-    model: config.model,
-    messages: messages as never,
-    temperature,
-    max_tokens: maxTokens,
-  } as any;
+  let lastError: unknown = null;
 
-  try {
-    const response = await client.chat.completions.create({
-      ...request,
-      response_format: { type: "json_object" },
-    });
-    return parseJsonObject(response.choices[0]?.message?.content || "");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (!message.toLowerCase().includes("response_format") && !message.toLowerCase().includes("json")) {
-      throw toAiError(error, config);
-    }
-    try {
-      const response = await client.chat.completions.create(request);
-      return parseJsonObject(response.choices[0]?.message?.content || "");
-    } catch (fallbackError) {
-      throw toAiError(fallbackError, config);
+  for (const config of requestConfigs()) {
+    const { client } = getAiClient(config);
+    const attempts = Number(cleanEnv(process.env.LLM_REQUEST_RETRIES)) || (config.provider === "openrouter" ? 3 : 2);
+    let canUseResponseFormat = true;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const request = {
+        model: config.model,
+        messages: messagesWithJsonGuard(messages, attempt) as never,
+        temperature,
+        max_tokens: maxTokens,
+      } as any;
+
+      try {
+        const response = await client.chat.completions.create(
+          canUseResponseFormat
+            ? {
+                ...request,
+                response_format: { type: "json_object" },
+              }
+            : request,
+        );
+        try {
+          return parseJsonObject(response.choices[0]?.message?.content || "");
+        } catch (parseError) {
+          lastError = parseError;
+          if (attempt < attempts - 1) {
+            await sleep(500 + attempt * 500);
+            continue;
+          }
+          throw parseError;
+        }
+      } catch (error) {
+        if (isResponseFormatIssue(error) && canUseResponseFormat) {
+          canUseResponseFormat = false;
+          lastError = error;
+          continue;
+        }
+        lastError = toAiError(error, config);
+        if (isTransientAiError(error) && attempt < attempts - 1) {
+          await sleep(800 + attempt * 900);
+          continue;
+        }
+        break;
+      }
     }
   }
+
+  throw lastError || new AppError("Нейронка временно не ответила. Повторите запрос.", 502);
 }
 
 function normaliseDataUrl(value: unknown) {
@@ -419,12 +521,6 @@ ${PROFESSIONAL_STANDARD}
 }
 Не переписывай текст заново, а именно извлеки урок для будущих генераций.`;
 
-const REFINE_SYSTEM = `Ты поддерживаешь профиль стиля копирайтера.
-Обнови существующий JSON-профиль по новому уроку правок. Не удаляй полезные старые правила.
-Не переобучай профиль на одной правке: добавляй только переносимые правила, которые помогут будущим текстам. Не запоминай тему, факты и частные формулировки конкретного материала.
-Добавь конкретные выводы в learned_corrections и усили prompt_addon, но оставь профиль компактным.
-Верни строго JSON-объект профиля с теми же основными полями.`;
-
 export async function analyzeStyle(examples: StoredExample[]) {
   const status = trainingStatus(examples);
   const trainingExamples = examples.slice(0, MAX_TRAINING_EXAMPLES);
@@ -567,7 +663,12 @@ export async function analyzeLesson({
   aiText: string;
   idealText: string;
 }) {
-  const recommendations = collectEntries((copywriter.recommendations || []).slice(0, 8), MAX_TEXT_CHARS);
+  const recommendations = collectEntries(
+    (copywriter.recommendations || []).slice(0, 4),
+    MAX_LESSON_RECOMMENDATION_CHARS,
+  );
+  const compactAiText = clampText(aiText, MAX_LESSON_TEXT_CHARS);
+  const compactIdealText = clampText(idealText, MAX_LESSON_TEXT_CHARS);
   const prompt = `Профиль стиля:
 ${JSON.stringify(copywriter.profile || {}, null, 2)}
 
@@ -575,12 +676,12 @@ ${JSON.stringify(copywriter.profile || {}, null, 2)}
 ${recommendations.texts.length ? recommendations.texts.join("\n\n") : "[не загружены]"}
 
 Работа ИИ:
-${aiText}
+${compactAiText}
 
 Идеальная работа человека:
-${idealText}
+${compactIdealText}
 
-Сравни тексты и извлеки уроки для будущей генерации.`;
+Сравни тексты и извлеки только переносимые уроки для будущей генерации. Не пересказывай оба текста и не запоминай частные факты материала.`;
 
   return (await callJson({
     messages: [
@@ -590,6 +691,19 @@ ${idealText}
     temperature: 0.2,
     maxTokens: 1100,
   })) as LessonAnalysis;
+}
+
+function mergeUnique(existing: unknown, additions: string[], limit: number) {
+  const seen = new Set<string>();
+  return [...toStringArray(existing, limit), ...additions]
+    .map((item) => clampText(item, 280))
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (!item || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, limit);
 }
 
 export async function refineProfile(profile: StyleProfile, lesson: LessonAnalysis) {
@@ -607,23 +721,27 @@ export async function refineProfile(profile: StyleProfile, lesson: LessonAnalysi
       capped: false,
       guidance: ["Статус обучения не рассчитан."],
     } satisfies NonNullable<StyleProfile["training_status"]>);
-  const refined = (await callJson({
-    messages: [
-      { role: "system", content: REFINE_SYSTEM },
-      {
-        role: "user",
-        content: `Текущий профиль:\n${JSON.stringify(profile || {}, null, 2)}\n\nНовый урок:\n${JSON.stringify(
-          lesson,
-          null,
-          2,
-        )}`,
-      },
-    ],
-    temperature: 0.2,
-    maxTokens: 1500,
-  })) as StyleProfile;
 
-  const normalised = normaliseProfile(refined, currentStatus);
+  const rulesToAdd = toStringArray(lesson.rules_to_add, 8);
+  const corrections = [
+    ...toStringArray(lesson.mistakes, 4).map((item) => `Ошибка ИИ: ${item}`),
+    ...toStringArray(lesson.missing_style_moves, 4).map((item) => `Добавлять прием: ${item}`),
+    ...rulesToAdd,
+  ];
+  const avoid = toStringArray(lesson.overused_patterns, 6).map((item) => `Не уходить в шаблон: ${item}`);
+  const promptPatch = clampText(lesson.prompt_patch || lesson.summary, 800);
+  const promptAddon = clampText([profile.prompt_addon, promptPatch].filter(Boolean).join("\n"), 1800);
+
+  const normalised = normaliseProfile(
+    {
+      ...profile,
+      do: mergeUnique(profile.do, rulesToAdd, 12),
+      avoid: mergeUnique(profile.avoid, avoid, 12),
+      learned_corrections: mergeUnique(profile.learned_corrections, corrections, MAX_LEARNED_CORRECTIONS),
+      prompt_addon: promptAddon,
+    },
+    currentStatus,
+  );
   normalised.trained_at = new Date().toISOString();
   return normalised;
 }

@@ -51,6 +51,9 @@ DATABASE_URL=postgresql://...
 AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=openrouter/free
+AI_FALLBACK_PROVIDER=gemini
+LLM_REQUEST_RETRIES=3
+LLM_TIMEOUT_MS=45000
 ```
 
 Откройте `http://localhost:3000`.
@@ -64,6 +67,9 @@ AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_MODEL=openrouter/free
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+AI_FALLBACK_PROVIDER=gemini
+LLM_REQUEST_RETRIES=3
+LLM_TIMEOUT_MS=45000
 ```
 
 `openrouter/free` сам выбирает доступную бесплатную модель и фильтрует её под возможности запроса: текст, изображения, JSON-ответы. У бесплатного режима есть дневные лимиты, поэтому для отдела это хороший старт и тестовый режим, но при активной работе может понадобиться платный лимит или отдельный корпоративный ключ.
@@ -76,13 +82,15 @@ GEMINI_API_KEY=...
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
+Если добавить `GEMINI_API_KEY` вместе с `AI_FALLBACK_PROVIDER=gemini`, приложение попробует Gemini автоматически, когда бесплатный OpenRouter временно отдаст 502/503/504 или не вернет корректный JSON.
+
 Если `AI_PROVIDER` не задан, приложение само выберет провайдера по найденному ключу в таком порядке: OpenRouter, Gemini, OpenAI.
 
 ## Деплой на Vercel
 
 1. Создайте проект на Vercel из папки `ai-copywriter-agent`.
 2. Подключите Neon Postgres и добавьте `DATABASE_URL`.
-3. Добавьте переменные для бесплатной нейронки: `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free`.
+3. Добавьте переменные для бесплатной нейронки: `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free`, `LLM_REQUEST_RETRIES=3`, `LLM_TIMEOUT_MS=45000`.
 4. Запустите деплой.
 
 Таблицы создаются автоматически при первом обращении к API.
