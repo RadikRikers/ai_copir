@@ -1,5 +1,5 @@
 import { generateCopy, trainingStatus } from "@/lib/ai";
-import { AppError, fail, jsonBody, ok } from "@/lib/http";
+import { AppError, fail, jsonBody, ok, requireAccess } from "@/lib/http";
 import { getCopywriter } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -12,6 +12,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    requireAccess(request);
     const { id } = await context.params;
     const body = await jsonBody(request);
     const copywriter = await getCopywriter(id);

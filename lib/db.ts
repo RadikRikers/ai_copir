@@ -373,12 +373,14 @@ export async function updateCopywriter(copywriterId: string, body: Record<string
   const current = await getCopywriter(copywriterId, false);
   const name = clampText(body.name ?? current.name, 160);
   const notes = clampText(body.notes ?? current.notes, 1200);
+  const ownerAccountId = clampText(body.accountId ?? current.owner_account_id ?? "", 120);
   if (!name) throw new AppError("Название агента не может быть пустым.");
   const sql = getSql();
   const rows = await sql`
     UPDATE copywriters
     SET name = ${name},
         notes = ${notes},
+        owner_account_id = ${ownerAccountId},
         updated_at = NOW()
     WHERE id = ${copywriterId}
     RETURNING id

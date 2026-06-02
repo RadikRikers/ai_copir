@@ -5,8 +5,10 @@ import {
   Clipboard,
   Database,
   GraduationCap,
+  Lock,
   Plus,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Wand2,
@@ -28,9 +30,14 @@ type ApiResponse<T> = T & {
 };
 
 type Health = {
+  provider?: string;
   model: string;
   llm_configured: boolean;
+  missing_llm_env?: string | null;
   database_configured: boolean;
+  database_ok?: boolean;
+  database_error?: string;
+  access_required?: boolean;
 };
 
 type GenerationResult = {
@@ -44,6 +51,10 @@ type GenerationResult = {
 const MIN_READY_EXAMPLES = 6;
 const MIN_READY_TEXT_CHARS = 2500;
 const RECOMMENDED_SHORT_POSTS = 10;
+const MAX_UPLOAD_FILES = 12;
+const MAX_TEXT_FILE_BYTES = 1_500_000;
+const MAX_IMAGE_FILE_BYTES = 4_500_000;
+const TEXT_FILE_EXTENSIONS = [".txt", ".md", ".csv", ".json", ".html", ".htm"];
 
 const tabs = [
   { id: "base", label: "База стиля", icon: Database },
@@ -52,15 +63,57 @@ const tabs = [
   { id: "lessons", label: "Правки", icon: GraduationCap },
 ] as const;
 
+const busyLabels: Record<string, string> = {
+  access: "проверяем доступ",
+  account: "сохраняем аккаунт",
+  create: "создаем агента",
+  rename: "сохраняем настройки агента",
+  examples: "пополняем базу стиля",
+  recommendations: "сохраняем рекомендации",
+  train: "обучаем профиль стиля",
+  generate: "пишем текст",
+  lesson: "анализируем правку",
+};
+
 type TabId = (typeof tabs)[number]["id"];
 
+class AccessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AccessError";
+  }
+}
+
+function storedAccessCode() {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem("appAccessCode") || "";
+}
+
+function saveAccessCode(code: string) {
+  window.localStorage.setItem("appAccessCode", code);
+  document.cookie = `app_access_code=${encodeURIComponent(code)}; path=/; max-age=2592000; SameSite=Lax`;
+}
+
+function clearAccessCode() {
+  window.localStorage.removeItem("appAccessCode");
+  document.cookie = "app_access_code=; path=/; max-age=0; SameSite=Lax";
+}
+
 async function api<T>(path: string, init?: RequestInit) {
+  const headers = new Headers(init?.headers);
+  headers.set("Content-Type", "application/json");
+  const accessCode = storedAccessCode();
+  if (accessCode) headers.set("x-app-access-code", accessCode);
+
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers,
   });
   const data = (await response.json().catch(() => ({}))) as ApiResponse<T>;
   if (!response.ok || data.ok === false) {
+    if (response.status === 401) {
+      throw new AccessError(data.error || "Введите код доступа администратора.");
+    }
     throw new Error(data.error || `Ошибка ${response.status}`);
   }
   return data;
@@ -145,13 +198,35 @@ function fileToDataUrl(file: File) {
   });
 }
 
+function isTextFile(file: File) {
+  const name = file.name.toLowerCase();
+  return (
+    file.type.startsWith("text/") ||
+    file.type === "application/json" ||
+    TEXT_FILE_EXTENSIONS.some((ext) => name.endsWith(ext))
+  );
+}
+
 async function readFiles(input: HTMLInputElement | null) {
   const files = Array.from(input?.files || []);
+  if (files.length > MAX_UPLOAD_FILES) {
+    throw new Error(`Загрузите не больше ${MAX_UPLOAD_FILES} файлов за один раз.`);
+  }
+
   const entries: IncomingFile[] = [];
   for (const file of files) {
     if (file.type.startsWith("image/")) {
+      if (file.size > MAX_IMAGE_FILE_BYTES) {
+        throw new Error(`Изображение «${file.name}» слишком большое. Сожмите его до 4,5 МБ.`);
+      }
       entries.push({ name: file.name, kind: "image", dataUrl: await fileToDataUrl(file) });
     } else {
+      if (!isTextFile(file)) {
+        throw new Error(`Файл «${file.name}» не похож на текст. Загрузите .txt/.md/.html или скриншот.`);
+      }
+      if (file.size > MAX_TEXT_FILE_BYTES) {
+        throw new Error(`Файл «${file.name}» слишком большой. Разбейте текст на части до 1,5 МБ.`);
+      }
       entries.push({ name: file.name, kind: "text", text: await fileToText(file) });
     }
   }
@@ -236,6 +311,10 @@ function StyleProfileView({ profile }: { profile: StyleProfile }) {
 
 export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [accessRequired, setAccessRequired] = useState(false);
+  const [accessCode, setAccessCode] = useState("");
+  const [accessInput, setAccessInput] = useState("");
+  const [accessDenied, setAccessDenied] = useState(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [copywriters, setCopywriters] = useState<Copywriter[]>([]);
@@ -254,6 +333,7 @@ export default function Home() {
   const [accountRole, setAccountRole] = useState("Редактор");
   const [agentName, setAgentName] = useState("");
   const [agentNotes, setAgentNotes] = useState("");
+  const [agentOwnerId, setAgentOwnerId] = useState("");
   const [exampleText, setExampleText] = useState("");
   const [exampleFileCount, setExampleFileCount] = useState(0);
   const [recommendationText, setRecommendationText] = useState("");
@@ -277,6 +357,7 @@ export default function Home() {
   const recommendationFilesRef = useRef<HTMLInputElement | null>(null);
   const sourceFilesRef = useRef<HTMLInputElement | null>(null);
   const syncVersionRef = useRef(0);
+  const toastTimerRef = useRef<number | undefined>(undefined);
 
   const selectedStats = useMemo(() => {
     const examples = selected?.examples?.length || selected?.example_count || 0;
@@ -284,6 +365,8 @@ export default function Home() {
     const recommendations = selected?.recommendations?.length || selected?.recommendation_count || 0;
     return { examples, lessons, recommendations };
   }, [selected]);
+
+  const busyLabel = busy ? busyLabels[busy] || "выполняем действие" : "";
 
   const readiness = useMemo(
     () => localTrainingStatus(selected?.examples || [], selected?.profile),
@@ -293,12 +376,46 @@ export default function Home() {
   useEffect(() => {
     setAgentName(selected?.name || "");
     setAgentNotes(selected?.notes || "");
-  }, [selected?.id, selected?.name, selected?.notes]);
+    setAgentOwnerId(selected?.owner_account_id || "");
+  }, [selected?.id, selected?.name, selected?.notes, selected?.owner_account_id]);
+
+  useEffect(() => {
+    return () => window.clearTimeout(toastTimerRef.current);
+  }, []);
 
   function showToast(message: string, isError = false) {
+    window.clearTimeout(toastTimerRef.current);
     setToast(message);
     setToastError(isError);
-    window.setTimeout(() => setToast(""), 4200);
+    toastTimerRef.current = window.setTimeout(() => setToast(""), 4200);
+  }
+
+  function showError(error: unknown) {
+    const message = error instanceof Error ? error.message : "Ошибка";
+    if (error instanceof AccessError) {
+      clearAccessCode();
+      setAccessCode("");
+      setAccessInput("");
+      setAccessRequired(true);
+      setAccessDenied(true);
+    }
+    showToast(message, true);
+  }
+
+  async function loadHealth() {
+    const data = await api<Health>("/api/health");
+    setHealth({
+      provider: data.provider,
+      model: data.model,
+      llm_configured: data.llm_configured,
+      missing_llm_env: data.missing_llm_env,
+      database_configured: data.database_configured,
+      database_ok: data.database_ok,
+      database_error: data.database_error,
+      access_required: data.access_required,
+    });
+    setAccessRequired(Boolean(data.access_required));
+    return data;
   }
 
   async function loadCopywriters(preferredId?: string) {
@@ -337,29 +454,62 @@ export default function Home() {
     if (remember) window.localStorage.setItem("selectedCopywriterId", id);
   }
 
+  async function unlockApp(event: FormEvent) {
+    event.preventDefault();
+    const code = accessInput.trim();
+    if (!code) {
+      setAccessDenied(true);
+      showToast("Введите код доступа", true);
+      return;
+    }
+
+    try {
+      setBusy("access");
+      saveAccessCode(code);
+      setAccessCode(code);
+      setAccessDenied(false);
+      await loadAccounts();
+      await loadCopywriters();
+      showToast("Доступ открыт");
+    } catch (error) {
+      clearAccessCode();
+      setAccessCode("");
+      setAccessDenied(true);
+      showError(error);
+    } finally {
+      setBusy("");
+    }
+  }
+
   useEffect(() => {
-    api<Health>("/api/health")
-      .then((data) =>
-        setHealth({
-          model: data.model,
-          llm_configured: data.llm_configured,
-          database_configured: data.database_configured,
-        }),
-      )
+    const savedAccessCode = storedAccessCode();
+    if (savedAccessCode) saveAccessCode(savedAccessCode);
+    setAccessCode(savedAccessCode);
+    setAccessInput(savedAccessCode);
+
+    loadHealth()
+      .then((data) => {
+        if (data.access_required && !savedAccessCode) return;
+        loadAccounts().catch(showError);
+        loadCopywriters().catch(showError);
+      })
       .catch(() => setHealth(null));
-    loadAccounts().catch((error) => showToast(error.message, true));
-    loadCopywriters().catch((error) => showToast(error.message, true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
+    if (accessRequired && !accessCode) {
+      setSyncStatus("нужен код доступа");
+      return;
+    }
+
     let source: EventSource | null = null;
     let cancelled = false;
     let reloadTimer: number | undefined;
 
     async function refreshFromCloud() {
-      await loadAccounts().catch((error) => showToast(error.message, true));
-      await loadCopywriters(selectedId).catch((error) => showToast(error.message, true));
+      await loadAccounts().catch(showError);
+      await loadCopywriters(selectedId).catch(showError);
     }
 
     async function connect() {
@@ -399,7 +549,7 @@ export default function Home() {
       source?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+  }, [selectedId, accessRequired, accessCode]);
 
   async function createCopywriter(event: FormEvent) {
     event.preventDefault();
@@ -418,7 +568,7 @@ export default function Home() {
       await loadCopywriters(data.copywriter.id);
       showToast("Копирайтер добавлен");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     } finally {
       setBusy("");
     }
@@ -442,7 +592,7 @@ export default function Home() {
       await loadAccounts(data.account.id);
       showToast("Аккаунт добавлен");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     } finally {
       setBusy("");
     }
@@ -454,9 +604,10 @@ export default function Home() {
       await api(`/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (selectedAccountId === id) setSelectedAccountId("");
       await loadAccounts("");
+      await loadCopywriters(selectedId);
       showToast("Аккаунт удалён");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     }
   }
 
@@ -466,13 +617,13 @@ export default function Home() {
       setBusy("rename");
       const data = await api<{ copywriter: Copywriter }>(`/api/copywriters/${encodeURIComponent(selectedId)}`, {
         method: "PATCH",
-        body: JSON.stringify({ name: agentName, notes: agentNotes }),
+        body: JSON.stringify({ name: agentName, notes: agentNotes, accountId: agentOwnerId }),
       });
       setSelected(data.copywriter);
       await loadCopywriters(selectedId);
       showToast("Название агента обновлено");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     } finally {
       setBusy("");
     }
@@ -498,7 +649,7 @@ export default function Home() {
       await loadCopywriters(selectedId);
       showToast("База пополнена");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     } finally {
       setBusy("");
     }
@@ -524,7 +675,7 @@ export default function Home() {
       await loadCopywriters(selectedId);
       showToast("Рекомендации добавлены");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     } finally {
       setBusy("");
     }
@@ -542,7 +693,7 @@ export default function Home() {
       await loadCopywriters(selectedId);
       showToast(readiness.ready ? "Профиль обучен и готов к работе" : "Профиль сохранён, но материалов ещё мало");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     } finally {
       setBusy("");
     }
@@ -555,8 +706,13 @@ export default function Home() {
       setTab("base");
       return;
     }
+    if (!theses.trim() && !sourceText.trim() && !sourceUrl.trim() && !sourceFilesRef.current?.files?.length) {
+      showToast("Добавьте тезисы или источник для нового текста", true);
+      return;
+    }
     try {
       setBusy("generate");
+      setResult(null);
       const sourceFiles = await readFiles(sourceFilesRef.current);
       const data = await api<{ result: GenerationResult }>(`/api/copywriters/${encodeURIComponent(selectedId)}/generate`, {
         method: "POST",
@@ -575,7 +731,7 @@ export default function Home() {
       setResult(data.result);
       showToast("Текст готов");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     } finally {
       setBusy("");
     }
@@ -599,7 +755,7 @@ export default function Home() {
       await loadCopywriters(selectedId);
       showToast("Правка разобрана, профиль обновлён");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     } finally {
       setBusy("");
     }
@@ -613,7 +769,7 @@ export default function Home() {
       await loadCopywriters(selectedId);
       showToast("Пример удалён");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     }
   }
 
@@ -625,7 +781,7 @@ export default function Home() {
       await loadCopywriters(selectedId);
       showToast("Правка удалена");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     }
   }
 
@@ -637,7 +793,7 @@ export default function Home() {
       await loadCopywriters(selectedId);
       showToast("Рекомендация удалена");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     }
   }
 
@@ -652,8 +808,49 @@ export default function Home() {
       await loadCopywriters("");
       showToast("Копирайтер удалён");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Ошибка", true);
+      showError(error);
     }
+  }
+
+  if (accessRequired && !accessCode) {
+    return (
+      <main className="auth-shell">
+        <form className="auth-panel" onSubmit={unlockApp}>
+          <div className="brand-mark">
+            <Lock size={22} />
+          </div>
+          <div>
+            <p className="eyebrow">Закрытый доступ</p>
+            <h1>Агент отдела</h1>
+            <p className="notes-line">
+              Введите код администратора, чтобы открыть базу копирайтеров, правки и генерацию.
+            </p>
+          </div>
+          <label htmlFor="accessCode">Код доступа</label>
+          <input
+            autoFocus
+            id="accessCode"
+            type="password"
+            value={accessInput}
+            onChange={(event) => {
+              setAccessInput(event.target.value);
+              setAccessDenied(false);
+            }}
+            placeholder="Введите код"
+          />
+          {accessDenied ? <p className="field-error">Код не принят. Проверьте значение `APP_ACCESS_CODE`.</p> : null}
+          <button className="primary-button" disabled={busy === "access"} type="submit">
+            <ShieldCheck size={16} />
+            {busy === "access" ? "Проверяю..." : "Войти"}
+          </button>
+          <div className="health-lines">
+            <span>{health?.database_ok ? "База отвечает" : "База не проверена"}</span>
+            <span>{health?.llm_configured ? `Нейронка: ${health.provider || ""} ${health.model}` : "Нейронка не настроена"}</span>
+          </div>
+        </form>
+        <div className={`toast ${toast ? "show" : ""} ${toastError ? "error" : ""}`}>{toast}</div>
+      </main>
+    );
   }
 
   return (
@@ -667,8 +864,8 @@ export default function Home() {
             <h1>Агент отдела</h1>
             <p>
               {health
-                ? `${health.database_configured ? "БД подключена" : "нет БД"} · ${
-                    health.llm_configured ? health.model : "нет LLM"
+                ? `${health.database_ok ? "БД работает" : health.database_configured ? "БД не отвечает" : "нет БД"} · ${
+                    health.llm_configured ? `${health.provider || "LLM"}: ${health.model}` : `нет LLM${health.missing_llm_env ? ` (${health.missing_llm_env})` : ""}`
                   } · ${syncStatus}`
                 : "проверка сервера"}
             </p>
@@ -746,7 +943,7 @@ export default function Home() {
 
         <div className="list-head">
           <span>Копирайтеры</span>
-          <button className="icon-button" onClick={() => loadCopywriters().catch((error) => showToast(error.message, true))}>
+          <button className="icon-button" onClick={() => loadCopywriters().catch(showError)} type="button">
             <RefreshCw size={17} />
           </button>
         </div>
@@ -789,6 +986,18 @@ export default function Home() {
                   rows={2}
                   placeholder="Заметки для отдела"
                 />
+                <select
+                  aria-label="Владелец агента"
+                  value={agentOwnerId}
+                  onChange={(event) => setAgentOwnerId(event.target.value)}
+                >
+                  <option value="">Без владельца</option>
+                  {accounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name} · {account.role}
+                    </option>
+                  ))}
+                </select>
                 <button className="secondary-button" disabled={busy === "rename"} onClick={renameAgent} type="button">
                   {busy === "rename" ? "Сохраняю..." : "Сохранить название"}
                 </button>
@@ -825,6 +1034,22 @@ export default function Home() {
             );
           })}
         </nav>
+
+        <div className="status-row">
+          <span className={`status-chip ${health?.database_ok ? "ok" : "warn"}`}>
+            {health?.database_ok ? "БД отвечает" : health?.database_configured ? "БД требует проверки" : "БД не подключена"}
+          </span>
+          <span className={`status-chip ${health?.llm_configured ? "ok" : "warn"}`}>
+            {health?.llm_configured ? `${health.provider || "LLM"} · ${health.model}` : `нет нейронки${health?.missing_llm_env ? ` · ${health.missing_llm_env}` : ""}`}
+          </span>
+          <span className="status-chip">{syncStatus}</span>
+          {busyLabel ? (
+            <span className="status-chip working">
+              <RefreshCw size={14} />
+              {busyLabel}
+            </span>
+          ) : null}
+        </div>
 
         {tab === "base" && (
           <div className="tab-panel">
@@ -1117,9 +1342,14 @@ export default function Home() {
                   <button
                     className="secondary-button"
                     disabled={!result?.text}
-                    onClick={() => {
-                      if (result?.text) navigator.clipboard.writeText(result.text);
-                      showToast("Текст скопирован");
+                    onClick={async () => {
+                      if (!result?.text) return;
+                      try {
+                        await navigator.clipboard.writeText(result.text);
+                        showToast("Текст скопирован");
+                      } catch {
+                        showToast("Браузер не дал доступ к буферу обмена", true);
+                      }
                     }}
                     type="button"
                   >

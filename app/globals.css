@@ -53,6 +53,37 @@ button:disabled {
   min-height: 100vh;
 }
 
+.auth-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 20px;
+}
+
+.auth-panel {
+  display: grid;
+  gap: 14px;
+  width: min(100%, 430px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 22px;
+}
+
+.field-error {
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.health-lines {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -358,7 +389,7 @@ select:focus {
 
 .agent-editor {
   display: grid;
-  grid-template-columns: minmax(180px, 280px) minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(180px, 260px) minmax(220px, 1fr) minmax(190px, 240px) auto;
   gap: 10px;
   align-items: start;
   margin-top: 12px;
@@ -404,6 +435,48 @@ select:focus {
 .tab.active {
   background: #fff;
   color: var(--ink);
+}
+
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.status-chip.ok {
+  border-color: rgba(15, 118, 110, 0.24);
+  background: #f0faf7;
+  color: var(--accent-strong);
+}
+
+.status-chip.warn {
+  border-color: rgba(138, 100, 0, 0.25);
+  background: #fffaf0;
+  color: var(--warning);
+}
+
+.status-chip.working svg {
+  animation: spin 1.1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .tab-panel {

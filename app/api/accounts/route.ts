@@ -1,11 +1,12 @@
 import { createAccount, listAccounts } from "@/lib/db";
-import { fail, jsonBody, ok } from "@/lib/http";
+import { fail, jsonBody, ok, requireAccess } from "@/lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    requireAccess(request);
     return ok({ accounts: await listAccounts() });
   } catch (error) {
     return fail(error);
@@ -14,6 +15,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    requireAccess(request);
     const body = await jsonBody(request);
     return ok({ account: await createAccount(body) }, 201);
   } catch (error) {

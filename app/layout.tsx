@@ -2,8 +2,13 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AI Copywriter Agent",
-  description: "Agent for learning copywriter style and generating texts.",
+  title: "AI Копир",
+  applicationName: "AI Копир",
+  description: "Закрытый агент отдела для сохранения стиля копирайтеров и генерации рабочих текстов.",
+  icons: {
+    icon: "/icon.svg",
+  },
+  manifest: "/manifest.webmanifest",
 };
 
 export default function RootLayout({

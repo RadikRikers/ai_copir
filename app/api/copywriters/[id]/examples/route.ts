@@ -1,5 +1,5 @@
 import { addExamples, getCopywriter } from "@/lib/db";
-import { fail, jsonBody, ok } from "@/lib/http";
+import { fail, jsonBody, ok, requireAccess } from "@/lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,6 +10,7 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   try {
+    requireAccess(request);
     const { id } = await context.params;
     const body = await jsonBody(request);
     const saved = await addExamples(id, body);

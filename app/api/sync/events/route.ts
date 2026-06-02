@@ -1,4 +1,5 @@
 import { syncEventsAfter } from "@/lib/db";
+import { fail, requireAccess } from "@/lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,6 +12,12 @@ function sleep(ms: number) {
 }
 
 export async function GET(request: Request) {
+  try {
+    requireAccess(request);
+  } catch (error) {
+    return fail(error);
+  }
+
   const url = new URL(request.url);
   let after = Number(url.searchParams.get("after") || "0");
   if (!Number.isFinite(after) || after < 0) after = 0;

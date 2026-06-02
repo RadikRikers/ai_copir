@@ -21,6 +21,32 @@ export function fail(error: unknown) {
   return NextResponse.json({ ok: false, error: message }, { status: 500 });
 }
 
+export function requireAccess(request: Request) {
+  const expected = process.env.APP_ACCESS_CODE?.trim();
+  if (!expected) return;
+
+  const url = new URL(request.url);
+  const cookieCode = (request.headers.get("cookie") || "")
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("app_access_code="))
+    ?.slice("app_access_code=".length);
+  let decodedCookieCode = "";
+  try {
+    decodedCookieCode = cookieCode ? decodeURIComponent(cookieCode) : "";
+  } catch {
+    decodedCookieCode = "";
+  }
+  const provided =
+    request.headers.get("x-app-access-code") ||
+    decodedCookieCode ||
+    url.searchParams.get("access") ||
+    "";
+  if (provided.trim() !== expected) {
+    throw new AppError("Введите код доступа администратора.", 401);
+  }
+}
+
 export async function jsonBody(request: Request) {
   try {
     const data = await request.json();

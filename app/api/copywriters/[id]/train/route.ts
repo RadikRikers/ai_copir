@@ -1,6 +1,6 @@
 import { analyzeStyle } from "@/lib/ai";
 import { getCopywriter, saveProfile } from "@/lib/db";
-import { fail, ok } from "@/lib/http";
+import { fail, ok, requireAccess } from "@/lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,8 +10,9 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
-export async function POST(_request: Request, context: RouteContext) {
+export async function POST(request: Request, context: RouteContext) {
   try {
+    requireAccess(request);
     const { id } = await context.params;
     const copywriter = await getCopywriter(id);
     const profile = await analyzeStyle(copywriter.examples || []);

@@ -48,6 +48,7 @@ npm run dev
 
 ```env
 DATABASE_URL=postgresql://...
+APP_ACCESS_CODE=сложный_код_для_админов
 AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=openrouter/free
@@ -57,6 +58,10 @@ LLM_TIMEOUT_MS=45000
 ```
 
 Откройте `http://localhost:3000`.
+
+## Доступ
+
+Для релиза задайте `APP_ACCESS_CODE` в Vercel Environment Variables. Тогда все API, кроме проверки здоровья `/api/health`, будут закрыты кодом администратора. Если переменная пустая, приложение работает без входа, что удобно только для локальной разработки.
 
 ## Нейронка
 
@@ -90,7 +95,8 @@ GEMINI_MODEL=gemini-2.5-flash
 
 1. Создайте проект на Vercel из папки `ai-copywriter-agent`.
 2. Подключите Neon Postgres и добавьте `DATABASE_URL`.
-3. Добавьте переменные для бесплатной нейронки: `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free`, `LLM_REQUEST_RETRIES=3`, `LLM_TIMEOUT_MS=45000`.
-4. Запустите деплой.
+3. Добавьте `APP_ACCESS_CODE`, чтобы закрыть рабочую базу от посторонних.
+4. Добавьте переменные для бесплатной нейронки: `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free`, `LLM_REQUEST_RETRIES=3`, `LLM_TIMEOUT_MS=45000`.
+5. Запустите деплой.
 
 Таблицы создаются автоматически при первом обращении к API.
